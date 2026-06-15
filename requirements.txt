@@ -1,0 +1,6 @@
+# buzzsearch has zero required pip dependencies.
+# All sources use Python stdlib (urllib, json, re, concurrent.futures, etc.)
+#
+# Optional dependencies:
+# yt-dlp   # YouTube search (install via pip if you want YouTube support)
+# hermes-agent # Only needed if using --x-login inside a Hermes Agent session
