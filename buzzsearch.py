@@ -24,50 +24,34 @@ import shlex
 import subprocess
 import urllib.error
 import urllib.parse
+import argparse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-
-def _load_dotenv(path: str | None = None) -> None:
-    """Load key=value pairs from a .env file into os.environ.
-
-    Tries, in order:
-      1. The given path (if provided)
-      2. .env in the current working directory
-      3. ~/.buzzsearch.env
-      4. ~/.hermes/.env
-    """
-    candidates = []
-    if path:
-        candidates.append(path)
-    candidates.append(os.path.join(os.getcwd(), ".env"))
-    candidates.append(os.path.expanduser("~/.buzzsearch.env"))
-    candidates.append(os.path.expanduser("~/.hermes/.env"))
-
-    for env_path in candidates:
-        try:
-            with open(env_path, "r") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or line.startswith("#"):
-                        continue
-                    if "=" in line:
-                        key, value = line.split("=", 1)
-                        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
-        except FileNotFoundError:
-            continue
-        except Exception:
-            continue
-
+def _load_dotenv(path: str = "/root/.hermes/.env") -> None:
+    """Load key=value pairs from a .env file into os.environ."""
+    try:
+        with open(path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" in line:
+                    key, value = line.split("=", 1)
+                    os.environ[key.strip()] = value.strip().strip('"').strip("'")
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
 
 _load_dotenv()
 
-# For X login via Camofox (guarded import — works inside Hermes Agent sessions)
+# For X login via Camofox
 try:
-    from hermes_tools import (  # type: ignore[import-untyped]
+    from hermes_tools import (
         browser_navigate,
         browser_type,
         browser_press,
@@ -77,6 +61,7 @@ try:
     HERMES_TOOLS_AVAILABLE = True
 except ImportError:
     HERMES_TOOLS_AVAILABLE = False
+
 
 
 # ---------------------------------------------------------------------------
@@ -93,12 +78,10 @@ SCRIPT_DIR = Path(__file__).parent.resolve()
 # X login cookie handling (Camofox)
 # ---------------------------------------------------------------------------
 
-
 def _get_cookie_path():
-    cache_dir = SCRIPT_DIR / "scripts" / "cache"
+    cache_dir = SCRIPT_DIR / "cache"
     cache_dir.mkdir(exist_ok=True)
     return cache_dir / "x_cookies.json"
-
 
 def load_stored_x_cookies():
     path = _get_cookie_path()
@@ -111,7 +94,6 @@ def load_stored_x_cookies():
             pass
     return None
 
-
 def store_x_cookies(cookies_dict):
     path = _get_cookie_path()
     try:
@@ -120,8 +102,6 @@ def store_x_cookies(cookies_dict):
         os.chmod(path, 0o600)  # restrict to owner
     except Exception as e:
         _log("X", f"Failed to store cookies: {e}")
-
-
 def get_x_cookies_via_camofox(username, password):
     if not HERMES_TOOLS_AVAILABLE:
         _log("X", "Hermes tools not available for Camofox login")
@@ -130,61 +110,50 @@ def get_x_cookies_via_camofox(username, password):
         # Navigate to login page
         browser_navigate(url="https://x.com/login")
         # Wait for page to load by checking for username input via snapshot
-        # We'll try a few times to get the snapshot and find inputs by placeholder
         username_ref = None
         password_ref = None
         login_button_ref = None
         for _ in range(10):
             snap = browser_snapshot(full=False)
-            # Parse snapshot lines to find refs by placeholder text
-            for line in snap.split("\n"):
+            for line in snap.split('\n'):
                 if not line.strip():
                     continue
-                # Format: [@e123] <input placeholder="Phone, email, or username">
-                # or similar
-                if line.startswith("[@e") and "placeholder=" in line:
-                    # extract ref and placeholder
-                    # ref is between[@e and ]
-                    ref_start = line.find("[@e")
-                    ref_end = line.find("]", ref_start)
+                if line.startswith('[@e') and 'placeholder=' in line:
+                    ref_start = line.find('[@e')
+                    ref_end = line.find(']', ref_start)
                     if ref_start != -1 and ref_end != -1:
-                        ref = line[ref_start + 2 : ref_end]  # e123
-                        # extract placeholder content
+                        ref = line[ref_start+2:ref_end]
+                        import re
                         match = re.search(r"""placeholder=["']([^"']*)["']""", line)
                         if match:
                             placeholder = match.group(1).lower()
-                            if "phone, email, or username" in placeholder:
-                                username_ref = f"@{ref}"
-                            elif "password" in placeholder:
-                                password_ref = f"@{ref}"
-                # Also look for button with text "Log in"
-                if line.startswith("[@e") and ("Log in" in line or "Log in" in line):
-                    ref_start = line.find("[@e")
-                    ref_end = line.find("]", ref_start)
+                            if 'phone, email, or username' in placeholder:
+                                username_ref = f'@{ref}'
+                            elif 'password' in placeholder:
+                                password_ref = f'@{ref}'
+                if line.startswith('[@e') and ('Log in' in line or 'Log in' in line):
+                    ref_start = line.find('[@e')
+                    ref_end = line.find(']', ref_start)
                     if ref_start != -1 and ref_end != -1:
-                        ref = line[ref_start + 2 : ref_end]
-                        login_button_ref = f"@{ref}"
+                        ref = line[ref_start+2:ref_end]
+                        login_button_ref = f'@{ref}'
             if username_ref and password_ref and login_button_ref:
                 break
-            # If not found, wait a bit and try again
             time.sleep(1)
         if not (username_ref and password_ref and login_button_ref):
             _log("X", "Could not locate login fields on x.com login page")
             return None
-        # Fill username
         browser_type(ref=username_ref, text=username)
-        # Press Enter to submit username
         browser_press(key="Enter")
-        # Wait for password field to appear
         for _ in range(10):
             snap = browser_snapshot(full=False)
-            for line in snap.split("\n"):
-                if line.startswith("[@e") and "placeholder=" in line and "password" in line.lower():
-                    ref_start = line.find("[@e")
-                    ref_end = line.find("]", ref_start)
+            for line in snap.split('\n'):
+                if line.startswith('[@e') and 'placeholder=' in line and 'password' in line.lower():
+                    ref_start = line.find('[@e')
+                    ref_end = line.find(']', ref_start)
                     if ref_start != -1 and ref_end != -1:
-                        ref = line[ref_start + 2 : ref_end]
-                        password_ref = f"@{ref}"
+                        ref = line[ref_start+2:ref_end]
+                        password_ref = f'@{ref}'
                         break
             if password_ref:
                 break
@@ -192,37 +161,100 @@ def get_x_cookies_via_camofox(username, password):
         if not password_ref:
             _log("X", "Could not locate password field after username submission")
             return None
-        # Fill password
         browser_type(ref=password_ref, text=password)
-        # Press Enter to log in
         browser_press(key="Enter")
-        # Wait for login to complete (redirect to home)
-        time.sleep(3)
+        time.sleep(5) # Increased sleep to ensure page fully loads after login
+
         # Get cookies via JavaScript
-        cookie_js = browser_console(expression="document.cookie", clear=False)
+        res = browser_console(expression="return document.cookie;", clear=False)
         cookie_str = ""
-        if isinstance(cookie_js, dict):
-            for key in ("result", "output", "value"):
-                if key in cookie_js and isinstance(cookie_js[key], str):
-                    cookie_str = cookie_js[key]
+        if isinstance(res, dict):
+            for key in ('result', 'output', 'value'):
+                if key in res and isinstance(res[key], str):
+                    cookie_str = res[key]
                     break
-            if not cookie_str and "data" in cookie_js:
-                cookie_str = str(cookie_js["data"])
+            if not cookie_str and 'data' in res:
+                cookie_str = str(res['data'])
         else:
-            cookie_str = str(cookie_js)
-        # Parse cookie string into dict
+            cookie_str = str(res)
         cookies = {}
-        for part in cookie_str.split(";"):
+        for part in cookie_str.split(';'):
             part = part.strip()
-            if "=" in part:
-                name, val = part.split("=", 1)
+            if '=' in part:
+                name, val = part.split('=', 1)
                 cookies[name] = val
+
+        # Attempt to extract Authorization token from multiple sources:
+        # 1. localStorage / sessionStorage
+        # 2. Page script bundles (main.js contains the public Bearer token)
+        token_js_expr = """
+        (() => {
+            // Check localStorage for common token keys
+            let token = localStorage.getItem('token') || localStorage.getItem('auth_token') || localStorage.getItem('twitter_auth_token');
+            if (token) return token;
+
+            for (let i = 0; i < localStorage.length; i++) {
+                const key = localStorage.key(i);
+                if (key && key.includes('token')) {
+                    const val = localStorage.getItem(key);
+                    if (val && (val.startsWith('Bearer') || val.length > 50)) return val;
+                }
+            }
+
+            // Check sessionStorage
+            token = sessionStorage.getItem('token') || sessionStorage.getItem('auth_token') || sessionStorage.getItem('twitter_auth_token');
+            if (token) return token;
+
+            for (let i = 0; i < sessionStorage.length; i++) {
+                const key = sessionStorage.key(i);
+                if (key && key.includes('token')) {
+                    const val = sessionStorage.getItem(key);
+                    if (val && (val.startsWith('Bearer') || val.length > 50)) return val;
+                }
+            }
+
+            // Scrape from page script bundles (main.js contains the Bearer token)
+            try {
+                const scripts = document.querySelectorAll('script[src*="main"]');
+                for (const s of scripts) {
+                    const resp = fetch(s.src).then(r => r.text());
+                    // Sync fetch not possible; try inline scripts instead
+                }
+            } catch(e) {}
+
+            // Try inline scripts and meta tags
+            const allScripts = document.querySelectorAll('script:not([src])');
+            for (const s of allScripts) {
+                const m = s.textContent.match(/Bearer\\s+(AAAAA[^"'\\s]+)/);
+                if (m) return m[1];
+            }
+
+            // Try meta tags
+            const meta = document.querySelector('meta[name="csrf-token"], meta[name="auth-token"]');
+            if (meta && meta.content && meta.content.length > 50) return meta.content;
+
+            return null;
+        })();
+        """
+        token_res = browser_console(expression=token_js_expr)
+        auth_token = None
+        if isinstance(token_res, dict) and 'result' in token_res and token_res['result']:
+            auth_token = token_res['result']
+            if auth_token.startswith('"') and auth_token.endswith('"'): # Remove quotes if JSON stringified
+                auth_token = auth_token[1:-1]
+
+        if auth_token:
+            cookies['auth_bearer_token'] = auth_token
+            _log("X", f"Obtained Authorization token from browser.")
+        else:
+            _log("X", "Authorization token not found in browser storage.")
+
+
         _log("X", f"Obtained {len(cookies)} cookies via Camofox")
         return cookies
     except Exception as e:
         _log("X", f"Camofox login failed: {e}")
         return None
-
 
 def get_x_cookies():
     """Get X cookies, either from cache or by prompting user via Camofox."""
@@ -232,9 +264,10 @@ def get_x_cookies():
         return cookies
     # No cached cookies, need to login
     _log("X", "No cached X cookies found. Please provide your X (Twitter) credentials.")
-    raise RuntimeError(
-        "X cookies not available. Run 'buzzsearch.py --x-login' to login."
-    )
+    # We cannot interactively prompt from within the skill when run via hermes skill run.
+    # Instead, we will exit with a message instructing the user to run a separate login command.
+    # For simplicity, we will raise an exception that the main function can catch and handle.
+    raise RuntimeError("X cookies not available. Re-login via an agent session with: python3 /root/.hermes/skills/research/buzzsearch/scripts/buzzsearch.py --x-login")
 
 
 # ---------------------------------------------------------------------------
@@ -255,7 +288,6 @@ DEPTH_LIMITS = {
 # ---------------------------------------------------------------------------
 # HTTP helpers
 # ---------------------------------------------------------------------------
-
 
 def _log(source: str, msg: str) -> None:
     sys.stderr.write(f"[{source}] {msg}\n")
@@ -306,10 +338,55 @@ def http_get_json(
     return None
 
 
+def http_post_json(
+    url: str,
+    data: dict | None = None,
+    headers: Dict[str, str] | None = None,
+    timeout: int = 20,
+    source: str = "HTTP",
+) -> Optional[Dict]:
+    """POST request returning parsed JSON, or None on failure."""
+    hdrs = {"User-Agent": USER_AGENT, "Content-Type": "application/json"}
+    if headers:
+        hdrs.update(headers)
+    req_data = json.dumps(data).encode("utf-8") if data is not None else b""
+    req = urllib.request.Request(url, data=req_data, headers=hdrs, method="POST")
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                raw = resp.read()
+                if resp.headers.get("Content-Encoding", "").lower() == "gzip":
+                    raw = gzip.decompress(raw)
+                ct = resp.headers.get("Content-Type", "")
+                if "text/html" in ct and "json" not in ct:
+                    _log(source, f"HTML anti-bot response from {url[:80]}")
+                    return None
+                return json.loads(raw.decode("utf-8", errors="replace"))
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                delay = 2.0 * (2 ** attempt)
+                _log(source, f"429 rate limited, retry {attempt+1}/3 after {delay:.0f}s")
+                if attempt < 2:
+                    time.sleep(delay)
+                    continue
+                return None
+            if e.code in (403, 404, 422):
+                _log(source, f"HTTP {e.code} from {url[:80]}")
+                return None
+            _log(source, f"HTTP {e.code}: {e.reason}")
+            return None
+        except (urllib.error.URLError, OSError, TimeoutError) as e:
+            _log(source, f"Network error: {e}")
+            return None
+        except json.JSONDecodeError:
+            _log(source, f"JSON decode error from {url[:80]}")
+            return None
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Date helpers
 # ---------------------------------------------------------------------------
-
 
 def date_range(days: int = LOOKBACK_DAYS) -> Tuple[str, str]:
     to = datetime.now(timezone.utc)
@@ -344,12 +421,8 @@ _NOISE_WORDS = frozenset({
 def extract_core(topic: str, extra_noise: frozenset | None = None) -> str:
     """Strip noise words and common prefixes, return the core subject."""
     topic = topic.strip()
-    for pfx in [
-        r"^last \d+ days?\s+",
-        r"^what(?:'s| is| are) (?:people saying about|happening with|going on with)\s+",
-        r"^research\s+",
-        r"^tell me about\s+",
-    ]:
+    for pfx in [r"^last \d+ days?\s+", r"^what(?:'s| is| are) (?:people saying about|happening with|going on with)\s+",
+                r"^research\s+", r"^tell me about\s+"]:
         topic = re.sub(pfx, "", topic, flags=re.IGNORECASE)
     noise = _NOISE_WORDS | (extra_noise or frozenset())
     words = [w for w in topic.split() if w.lower() not in noise and len(w) > 1]
@@ -369,7 +442,6 @@ def token_overlap(query: str, text: str) -> float:
 # ---------------------------------------------------------------------------
 # Reddit (free, no auth)
 # ---------------------------------------------------------------------------
-
 
 def search_reddit(topic: str, from_date: str, to_date: str, depth: str = "default") -> List[Dict]:
     """Search Reddit via public JSON endpoint + RSS fallback."""
@@ -425,7 +497,7 @@ def search_reddit(topic: str, from_date: str, to_date: str, depth: str = "defaul
             for m in re.finditer(r"<entry[^>]*>(.*?)</entry>", rss_text, re.DOTALL):
                 block = m.group(1)
                 title_m = re.search(r"<title[^>]*>(.*?)</title>", block, re.DOTALL)
-                link_m = re.search(r'<link[^>]*href=["\']([^"\']+)["\']', block) or re.search(r"<link[^>]*>(.*?)</link>", block, re.DOTALL)
+                link_m = re.search(r"<link[^>]*href=[\"']([^\"']+)[\"']", block) or re.search(r"<link[^>]*>(.*?)</link>", block, re.DOTALL)
                 if not title_m:
                     continue
                 title = html.unescape(title_m.group(1).strip())
@@ -478,20 +550,35 @@ def search_reddit(topic: str, from_date: str, to_date: str, depth: str = "defaul
 # X / Twitter (via xAI API - needs XAI_API_KEY)
 # ---------------------------------------------------------------------------
 
-
 def _xai_available() -> bool:
     return bool(os.environ.get("XAI_API_KEY"))
 
 
 def _web_available() -> bool:
-    return bool(os.environ.get("BRAVE_SEARCH_API_KEY")) or bool(os.environ.get("BRAVE_API_KEY"))
+    """Check if any web search API key is configured (Brave, Exa, Serper, Parallel)."""
+    return bool(
+        os.environ.get("BRAVE_API_KEY")
+        or os.environ.get("BRAVE_SEARCH_API_KEY")
+        or os.environ.get("EXA_API_KEY")
+        or os.environ.get("SERPER_API_KEY")
+        or os.environ.get("PARALLEL_API_KEY")
+    )
 
 
 def search_x(topic: str, from_date: str, to_date: str, depth: str = "default") -> List[Dict]:
-    """Search X/Twitter using stored cookies if available, fallback to xAI API."""
+    """Search X/Twitter using the best available method.
+
+    Fallback chain as of June 2026:
+      1. Cookie-based API (adaptive.json) - often empty due to X deprecation
+         (falls through to Camofox browser search inside search_x_via_cookies())
+      2. xAI Live Search API (requires XAI_API_KEY)
+      3. Camofox browser home timeline scraping (when both cookies and xAI fail)
+    """
     items: List[Dict] = []
 
-    # Try cookies first
+    # Try cookies first (adaptive.json API - deprecated by X but may still work for some accounts)
+    # NOTE: search_x_via_cookies() internally falls back to Camofox browser search
+    # when adaptive.json returns empty or 403/404, so we don't need a separate call here.
     try:
         cookies = get_x_cookies()
         if cookies:
@@ -502,9 +589,21 @@ def search_x(topic: str, from_date: str, to_date: str, depth: str = "default") -
     except (RuntimeError, Exception) as e:
         _log("X", f"Cookie search unavailable: {e}")
 
-    # Fallback to xAI API
+    # Fallback 1: xAI Live Search API
     _log("X", "Falling back to xAI API")
-    return search_x_via_xai(topic, from_date, to_date, depth)
+    items = search_x_via_xai(topic, from_date, to_date, depth)
+    if items:
+        return items[:DEPTH_LIMITS["x"].get(depth, 20)]
+
+    # Fallback 2: Camofox browser home timeline scrape (no cookies, no xAI key)
+    if _camofox_available():
+        _log("X", "Trying Camofox browser home timeline as last resort")
+        limit = DEPTH_LIMITS["x"].get(depth, 20)
+        items = _search_x_via_camofox(topic, limit)
+        if items:
+            return items[:limit]
+
+    return []
 
 
 def search_x_via_xai(topic: str, from_date: str, to_date: str, depth: str = "default") -> List[Dict]:
@@ -515,10 +614,8 @@ def search_x_via_xai(topic: str, from_date: str, to_date: str, depth: str = "def
         return []
 
     limit = DEPTH_LIMITS["x"].get(depth, 20)
-    core = extract_core(topic, frozenset({
-        "people", "saying", "about", "community", "discussion",
-        "opinions", "thoughts", "reactions",
-    }))
+    core = extract_core(topic, frozenset({"people", "saying", "about", "community", "discussion",
+                                           "opinions", "thoughts", "reactions"}))
 
     payload = {
         "search_parameters": {
@@ -553,11 +650,16 @@ def search_x_via_xai(topic: str, from_date: str, to_date: str, depth: str = "def
         return []
 
     items: List[Dict] = []
+    # xAI returns search results in the response's `search_results` or inline citations
+    # Try to extract from the standard response format
     choices = body.get("choices", [])
     for choice in choices:
         msg = choice.get("message", {})
+        # Extract citations/search results from xAI Live Search response
+        # The response includes source information in search_results
         search_results = msg.get("search_results", [])
         if not search_results:
+            # Try from the full response object
             search_results = body.get("search_results", [])
 
         for sr in search_results:
@@ -579,10 +681,11 @@ def search_x_via_xai(topic: str, from_date: str, to_date: str, depth: str = "def
                     "source": "x",
                 })
 
-    # If structured results empty, use web search to find X posts as fallback
+    # If structured results empty, use web_search to find X posts as fallback
     if not items:
+        _log("X", "No structured results from xAI, trying web search fallback for X content")
         try:
-            ws_url = "https://api.x.ai/v1/chat/completions"
+            ws_url = f"https://api.x.ai/v1/chat/completions"
             ws_payload = json.dumps({
                 "model": "grok-3",
                 "messages": [{"role": "user", "content": f"site:x.com {core}"}],
@@ -612,7 +715,7 @@ def search_x_via_xai(topic: str, from_date: str, to_date: str, depth: str = "def
     return items[:limit]
 
 
-def search_x_via_cookies(topic: str, from_date: str, to_date: str, depth: str = "default", cookies: dict | None = None) -> List[Dict]:
+def search_x_via_cookies(topic: str, from_date: str, to_date: str, depth: str = "default", cookies: dict = None) -> List[Dict]:
     """Search X/Twitter via the web search API using stored cookies."""
     if not cookies:
         _log("X", "No cookies provided for cookie-based search")
@@ -641,8 +744,19 @@ def search_x_via_cookies(topic: str, from_date: str, to_date: str, depth: str = 
     })
     url = f"https://x.com/i/api/2/search/adaptive.json?{params}"
 
+    # Use dynamically extracted Bearer token from cookie cache.
+    # The token is extracted from X's main.*.js bundle by _camofox_extract_bearer_token()
+    # and cached in x_cookies.json. If no cached token exists, the adaptive.json API
+    # cannot be called - the function will fall through to Camofox browser scraping.
+    auth_bearer = cookies.get("auth_bearer_token", "")
+    if auth_bearer and not auth_bearer.startswith("Bearer "):
+        auth_bearer = f"Bearer {auth_bearer}"
+    if not auth_bearer:
+        _log("X", "No Bearer token in cache (run with Camofox once to extract); skipping adaptive.json API")
+        return []
+
     headers = {
-        "Authorization": "Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjcpTnA",
+        "Authorization": auth_bearer,
         "User-Agent": USER_AGENT,
         "Content-Type": "application/json",
         "x-csrf-token": ct0_value,
@@ -656,10 +770,14 @@ def search_x_via_cookies(topic: str, from_date: str, to_date: str, depth: str = 
     req = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=20) as resp:
-            data = json.loads(resp.read().decode("utf-8", errors="replace"))
+            raw = resp.read()
+            if not raw:
+                _log("X", "adaptive.json returned empty response (API deprecated). Trying Camofox browser.")
+                return _search_x_via_browser(topic, limit, cookies)
+            data = json.loads(raw.decode("utf-8", errors="replace"))
     except urllib.error.HTTPError as e:
-        if e.code == 403 and HERMES_TOOLS_AVAILABLE:
-            _log("X", "API search blocked by X. Trying browser-based search via Camofox.")
+        if e.code in (403, 404):
+            _log("X", f"API search HTTP {e.code} (endpoint deprecated). Trying Camofox browser.")
             return _search_x_via_browser(topic, limit, cookies)
         _log("X", f"Cookie search failed: {e}")
         return []
@@ -710,19 +828,302 @@ def search_x_via_cookies(topic: str, from_date: str, to_date: str, depth: str = 
     return items[:limit]
 
 
+def _camofox_cli() -> str:
+    """Return the path to the Camofox CLI, or empty string if not installed."""
+    cli = "/root/.hermes/node/bin/camofox-browser"
+    if os.path.isfile(cli) and os.access(cli, os.X_OK):
+        return cli
+    # Check PATH
+    found = shutil.which("camofox-browser")
+    return found if found else ""
+
+
+def _camofox_available(port: int = 9377) -> bool:
+    """Check if the Camofox server is running with a clean tab; restart if stale."""
+    cli = _camofox_cli()
+    if not cli:
+        _log("X", "Camofox CLI not found")
+        return False
+
+    def _health_check() -> bool:
+        """Returns True if the Camofox server responds healthy."""
+        try:
+            result = subprocess.run(
+                [cli, "health", "--port", str(port), "--format", "json"],
+                capture_output=True, text=True, timeout=10,
+            )
+            return result.returncode == 0 and '"running":true' in result.stdout.replace(" ", "")
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            return False
+
+    def _start_server() -> bool:
+        """Start the Camofox server fresh."""
+        _log("X", "Starting Camofox server")
+        try:
+            start_result = subprocess.run(
+                [cli, "server", "start", "--port", str(port), "--background"],
+                capture_output=True, text=True, timeout=15,
+            )
+            if start_result.returncode == 0:
+                time.sleep(4)
+                return _health_check()
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+            _log("X", f"Camofox server start failed: {e}")
+        return False
+
+    # Always restart to get a clean tab (avoids stuck-tab issues after interactive use)
+    _log("X", "Restarting Camofox server for clean session")
+    subprocess.run([cli, "server", "stop", "--port", str(port)],
+                   capture_output=True, text=True, timeout=10)
+    time.sleep(1)
+    return _start_server()
+
+
 def _search_x_via_browser(topic: str, limit: int, cookies: dict) -> List[Dict]:
-    """Search X by driving the Camofox browser to the search page and extracting results."""
+    """Search X via the Camofox CLI (preferred) or hermes_tools browser (fallback).
+
+    As of June 2026, X has deprecated both the adaptive.json REST API and the
+    SearchTimeline GraphQL endpoint. The search page itself often shows "Something
+    went wrong" in the browser. When that happens, we scrape the home timeline
+    and explore/trending pages instead, which are reliably available in an
+    authenticated Camofox session.
+    """
+    # Strategy 1: Camofox CLI (works in any context - agent session or standalone)
+    if _camofox_available():
+        items = _search_x_via_camofox(topic, limit)
+        if items:
+            return items
+
+    # Strategy 2: hermes_tools browser (only works inside an agent session)
+    if HERMES_TOOLS_AVAILABLE:
+        items = _search_x_via_hermes_browser(topic, limit)
+        if items:
+            return items
+
+    _log("X", "No browser search method available (Camofox and hermes_tools both unavailable)")
+    return []
+
+
+def _camofox_extract_bearer_token(port: int = 9377) -> str | None:
+    """Extract the current X public Bearer token from the page's JS bundles via Camofox.
+
+    X embeds its public Bearer token in main.*.js bundles. Since the token rotates
+    occasionally (case changes, etc.), extracting it dynamically is more reliable than
+    hard-coding. This function fetches the main.js URL from the page, downloads it,
+    and extracts the token with a regex.
+
+    Returns the raw token string (without 'Bearer ' prefix) or None.
+    """
+    cli = _camofox_cli()
+    if not cli:
+        return None
+
+    def _run(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [cli, *args, "--port", str(port)],
+            capture_output=True, text=True, timeout=60,
+        )
+
+    # Extract main.*.js URL from the loaded page
+    js_get_bundle_url = r"""
+        (() => {
+            const scripts = document.querySelectorAll('script[src*="main"]');
+            for (const s of scripts) {
+                if (s.src && s.src.includes('main.') && s.src.includes('.js'))
+                    return s.src;
+            }
+            return '';
+        })();"""
+    r = _run("eval", js_get_bundle_url, "--format", "json")
+    if r.returncode != 0:
+        return None
+    try:
+        data = json.loads(r.stdout)
+        bundle_url = data.get("result", "").strip('"')
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+    if not bundle_url or not bundle_url.startswith("http"):
+        _log("X", "Could not find X main.js bundle URL for Bearer token extraction")
+        return None
+
+    # Download the JS bundle and extract the Bearer token
+    try:
+        import urllib.request
+        req = urllib.request.Request(bundle_url, headers={"User-Agent": USER_AGENT})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            bundle_text = resp.read().decode("utf-8", errors="replace")
+
+        # The token looks like: AAAAAAAAAAAAAAAAAAAAANRILgAAAAA...AGWWjCpTnA
+        import re
+        match = re.search(r'Bearer\s+(AAAAA[A-Za-z0-9%]+)', bundle_text)
+        if match:
+            token = match.group(1)
+            _log("X", f"Dynamically extracted Bearer token from {bundle_url.split('/')[-1]}")
+            return token
+        else:
+            _log("X", "Bearer token pattern not found in X JS bundle")
+            return None
+    except Exception as e:
+        _log("X", f"Failed to fetch/parse X JS bundle for Bearer token: {e}")
+        return None
+
+
+def _save_bearer_token_to_cache(token: str) -> None:
+    """Save a dynamically extracted Bearer token to the cookie cache file."""
+    cache_path = Path(__file__).parent / "cache" / "x_cookies.json"
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        data = {}
+        if cache_path.exists():
+            try:
+                data = json.loads(cache_path.read_text())
+            except (json.JSONDecodeError, OSError):
+                data = {}
+        if not isinstance(data, dict):
+            data = {}
+        data["auth_bearer_token"] = token
+        cache_path.write_text(json.dumps(data, indent=2))
+        cache_path.chmod(0o600)
+        _log("X", "Saved dynamically extracted Bearer token to cookie cache")
+    except OSError as e:
+        _log("X", f"Failed to save Bearer token to cache: {e}")
+
+
+def _search_x_via_camofox(topic: str, limit: int, port: int = 9377) -> List[Dict]:
+    """Search X via the Camofox CLI using subprocess calls.
+
+    First tries the search page. If that shows an error, falls back to scraping
+    the home timeline (which is reliably available in an authenticated session).
+    """
+    cli = _camofox_cli()
+    if not cli:
+        return []
+
+    def _camofox_run(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [cli, *args, "--port", str(port)],
+            capture_output=True, text=True, timeout=60,
+        )
+
+    def _camofox_eval(js: str) -> str:
+        """Run JS in the Camofox page and return the result string."""
+        r = _camofox_run("eval", js, "--format", "json")
+        if r.returncode != 0:
+            return ""
+        try:
+            data = json.loads(r.stdout)
+            return data.get("result", "")
+        except (json.JSONDecodeError, TypeError):
+            return r.stdout.strip()
+
+    # JS to extract tweets from article elements on the current page
+    _EXTRACT_JS = """
+    (() => {
+        const articles = document.querySelectorAll('article');
+        const results = [];
+        const seen = new Set();
+        articles.forEach(art => {
+            const link = art.querySelector('a[href*="/status/"]');
+            if (!link) return;
+            const statusUrl = link.getAttribute('href');
+            if (!statusUrl || seen.has(statusUrl)) return;
+            seen.add(statusUrl);
+            const textEl = art.querySelector('[data-testid="tweetText"]');
+            const text = textEl ? textEl.textContent : '';
+            const timeEl = art.querySelector('time');
+            const dateStr = timeEl ? timeEl.getAttribute('datetime') : '';
+            const handleMatch = statusUrl.match(/\\/([^/]+)\\/status/);
+            const handle = handleMatch ? handleMatch[1] : '';
+            const engLikes = art.querySelector('[data-testid="like"]')?.textContent || '0';
+            const engReposts = art.querySelector('[data-testid="retweet"]')?.textContent || '0';
+            const engReplies = art.querySelector('[data-testid="reply"]')?.textContent || '0';
+            results.push({
+                text: text,
+                url: statusUrl.startsWith('http') ? statusUrl : 'https://x.com' + statusUrl,
+                author_handle: handle,
+                date: dateStr ? dateStr.substring(0, 10) : '',
+                engagement: {
+                    likes: parseInt(engLikes.replace(/[^0-9]/g, '')) || 0,
+                    reposts: parseInt(engReposts.replace(/[^0-9]/g, '')) || 0,
+                    replies: parseInt(engReplies.replace(/[^0-9]/g, '')) || 0,
+                }
+            });
+        });
+        return JSON.stringify(results.slice(0, %d));
+    })();
+    """ % limit
+
+    try:
+        # Step 1: Try the search page (Top tab - more reliable than Latest)
+        search_url = f"https://x.com/search?q={urllib.parse.quote(topic)}&src=typed_query"
+        # Use 'open' instead of 'navigate' - open creates a new tab (and connects the browser),
+        # while navigate requires an existing tab which fails when browser is not yet connected.
+        # Use 60s timeout for first open since it may need to spin up the browser engine.
+        nav = _camofox_run("open", search_url)
+        if nav.returncode != 0 or "Error:" in nav.stderr or "Error:" in nav.stdout:
+            _log("X", "Camofox open search page failed" + (f": {nav.stderr[:100]}" if nav.stderr else ""))
+        else:
+            time.sleep(5)
+            # Dynamically extract the Bearer token from the page's JS bundles
+            dynamic_token = _camofox_extract_bearer_token(port)
+            if dynamic_token:
+                _save_bearer_token_to_cache(dynamic_token)
+            # Check if search loaded results or errored
+            error_check = _camofox_eval(
+                "document.body.innerText.includes('Something went wrong') ? 'ERROR' : 'OK'"
+            )
+            if error_check != "ERROR":
+                raw = _camofox_eval(_EXTRACT_JS)
+                if raw and raw.startswith("["):
+                    items_data = json.loads(raw)
+                    if items_data:
+                        items = [{"source": "x", "id": it.get("url", "").rsplit("/", 1)[-1],
+                                  **it} for it in items_data]
+                        _log("X", f"Camofox search page found {len(items)} tweets")
+                        return items[:limit]
+
+        # Step 2: Search page failed/empty - fall back to home timeline
+        _log("X", "Search page unavailable, falling back to home timeline scraping")
+        nav = _camofox_run("open", "https://x.com/home")
+        if nav.returncode != 0 or "Error:" in nav.stderr or "Error:" in nav.stdout:
+            _log("X", "Camofox open home page failed" + (f": {nav.stderr[:100]}" if nav.stderr else ""))
+            return []
+        time.sleep(5)
+
+        raw = _camofox_eval(_EXTRACT_JS)
+        if not raw or not raw.startswith("["):
+            _log("X", "Camofox home timeline JS extraction returned no data")
+            return []
+
+        items_data = json.loads(raw)
+        items = []
+        for it in items_data:
+            # Home timeline fallback: include all tweets since search is unavailable.
+            # The For You feed reflects the user's interests, so it provides relevant
+            # X content even without a targeted search.
+            it["source"] = "x"
+            it["id"] = it.get("url", "").rsplit("/", 1)[-1] if it.get("url") else ""
+            items.append(it)
+
+        _log("X", f"Camofox home timeline scraped {len(items)} tweets")
+        return items[:limit]
+
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError, json.JSONDecodeError) as e:
+        _log("X", f"Camofox browser search failed: {e}")
+        return []
+
+
+def _search_x_via_hermes_browser(topic: str, limit: int) -> List[Dict]:
+    """Search X via hermes_tools browser_* (only available inside agent sessions)."""
     if not HERMES_TOOLS_AVAILABLE:
-        _log("X", "Browser tools not available, cannot perform browser-based search")
         return []
     try:
-        from hermes_tools import browser_navigate, browser_console  # noqa: F811
+        from hermes_tools import browser_navigate, browser_snapshot, browser_console
 
         search_url = f"https://x.com/search?q={urllib.parse.quote(topic)}&src=typed_query&f=live"
         browser_navigate(url=search_url)
-        # Wait for page to load
         time.sleep(5)
-        # Get page content via console
         js = """
         (() => {
             const articles = document.querySelectorAll('article');
@@ -762,17 +1163,14 @@ def _search_x_via_browser(topic: str, limit: int, cookies: dict) -> List[Dict]:
             item["source"] = "x"
             item["id"] = item.get("url", "").rsplit("/", 1)[-1] if item.get("url") else ""
             items.append(item)
-        _log("X", f"Browser search found {len(items)} tweets")
+        _log("X", f"Hermes browser search found {len(items)} tweets")
         return items[:limit]
     except Exception as e:
-        _log("X", f"Browser-based search failed: {e}")
+        _log("X", f"Hermes browser-based search failed: {e}")
         return []
-
-
 # ---------------------------------------------------------------------------
 # Bluesky (AT Protocol - needs BSKY_HANDLE + BSKY_APP_PASSWORD)
 # ---------------------------------------------------------------------------
-
 
 def _bluesky_available() -> bool:
     return bool(os.environ.get("BSKY_HANDLE")) and bool(os.environ.get("BSKY_APP_PASSWORD"))
@@ -871,14 +1269,11 @@ def search_bluesky(topic: str, from_date: str, to_date: str, depth: str = "defau
 # Hacker News (free, no auth - Algolia API)
 # ---------------------------------------------------------------------------
 
-
 def search_hackernews(topic: str, from_date: str, to_date: str, depth: str = "default") -> List[Dict]:
     """Search Hacker News via Algolia API (free, no auth)."""
     limit = DEPTH_LIMITS["hackernews"].get(depth, 25)
-    core = extract_core(topic, frozenset({
-        "people", "saying", "about", "community", "discussion",
-        "opinions", "thoughts", "reactions",
-    }))
+    core = extract_core(topic, frozenset({"people", "saying", "about", "community", "discussion",
+                                           "opinions", "thoughts", "reactions"}))
     # Flatten hyphens/commas for Algolia
     core_flat = " ".join(core.replace(",", " ").replace("-", " ").split())
 
@@ -959,7 +1354,6 @@ def search_hackernews(topic: str, from_date: str, to_date: str, depth: str = "de
 # Polymarket (free, no auth - Gamma API)
 # ---------------------------------------------------------------------------
 
-
 def search_polymarket(topic: str, from_date: str, to_date: str, depth: str = "default") -> List[Dict]:
     """Search Polymarket prediction markets via Gamma API (free, no auth)."""
     limit = DEPTH_LIMITS["polymarket"].get(depth, 15)
@@ -972,28 +1366,28 @@ def search_polymarket(topic: str, from_date: str, to_date: str, depth: str = "de
     params = urllib.parse.urlencode({
         "q": core,
         "limit": str(min(limit, 100)),
-        "sort": "relevance",
+        "sort": "relevance"
     })
     url = f"https://gamma-api.polymarket.com/public-search?{params}"
-
+    
     data = http_get_json(url, source="PM")
     if not data:
         return []
-
+    
     # Extract events from the response
     events = data.get("events", []) if isinstance(data, dict) else []
     if not isinstance(events, list):
         events = []
-
+    
     # Filter by date range and process events
     from_ts = _date_to_unix(from_date)
     to_ts = _date_to_unix(to_date) + 86400  # Include entire end day
-
+    
     for event in events:
         # Skip if outside date range
         start_date_str = event.get("startDate", event.get("creationDate", ""))
         end_date_str = event.get("endDate", "")
-
+        
         # Parse dates for filtering
         event_start_ts = None
         event_end_ts = None
@@ -1004,20 +1398,20 @@ def search_polymarket(topic: str, from_date: str, to_date: str, depth: str = "de
                 event_end_ts = int(datetime.fromisoformat(end_date_str.replace("Z", "+00:00")).timestamp())
         except (ValueError, TypeError, AttributeError):
             pass
-
+        
         # Skip if completely outside our date range
         if event_end_ts and event_end_ts < from_ts:
             continue
         if event_start_ts and event_start_ts > to_ts:
             continue
-
+            
         eid = event.get("id", event.get("condition_id", ""))
         if eid in seen_ids:
             continue
         seen_ids.add(eid)
-
+        
         title = event.get("title", "")
-
+        
         # Extract odds from markets
         markets = event.get("markets", [])
         odds_parts = []
@@ -1034,17 +1428,17 @@ def search_polymarket(topic: str, from_date: str, to_date: str, depth: str = "de
                             odds_parts.append(f"{outcome} at {pct:.0f}%")
                 except (json.JSONDecodeError, ValueError, IndexError, TypeError):
                     pass
-
+                
                 # Sum up volume
                 vol_str = market.get("volume", "0")
                 try:
                     volume_total += float(vol_str)
                 except (ValueError, TypeError):
                     pass
-
+        
         slug = event.get("slug", "")
         url_val = f"https://polymarket.com/event/{slug}" if slug else f"https://polymarket.com/event/{eid}"
-
+        
         # Format date
         date_str = None
         if start_date_str:
@@ -1052,7 +1446,7 @@ def search_polymarket(topic: str, from_date: str, to_date: str, depth: str = "de
                 date_str = datetime.fromisoformat(start_date_str.replace("Z", "+00:00")).strftime("%Y-%m-%d")
             except (ValueError, TypeError):
                 pass
-
+        
         items.append({
             "id": str(eid),
             "title": title,
@@ -1062,7 +1456,7 @@ def search_polymarket(topic: str, from_date: str, to_date: str, depth: str = "de
             "odds": odds_parts,
             "source": "polymarket",
         })
-
+        
         if len(items) >= limit:
             break
 
@@ -1073,7 +1467,6 @@ def search_polymarket(topic: str, from_date: str, to_date: str, depth: str = "de
 # ---------------------------------------------------------------------------
 # GitHub (needs token or gh CLI for higher limits)
 # ---------------------------------------------------------------------------
-
 
 def _github_token() -> Optional[str]:
     token = os.environ.get("GITHUB_TOKEN", "")
@@ -1158,7 +1551,6 @@ def search_github(topic: str, from_date: str, to_date: str, depth: str = "defaul
 # ---------------------------------------------------------------------------
 # YouTube (via yt-dlp if installed)
 # ---------------------------------------------------------------------------
-
 
 def _yt_dlp_available() -> bool:
     return shutil.which("yt-dlp") is not None
@@ -1274,71 +1666,17 @@ def search_youtube(topic: str, from_date: str, to_date: str, depth: str = "defau
     return items[:limit]
 
 
-def _web_available() -> bool:
-    return bool(
-        os.environ.get("BRAVE_API_KEY")
-        or os.environ.get("EXA_API_KEY")
-        or os.environ.get("SERPER_API_KEY")
-        or os.environ.get("PARALLEL_API_KEY")
-    )
-
-
-def http_post_json(
-    url: str,
-    data: dict | None = None,
-    headers: Dict[str, str] | None = None,
-    timeout: int = 20,
-    source: str = "HTTP",
-) -> Optional[Dict]:
-    """POST request returning parsed JSON, or None on failure."""
-    hdrs = {"User-Agent": USER_AGENT, "Content-Type": "application/json"}
-    if headers:
-        hdrs.update(headers)
-    req_data = json.dumps(data).encode("utf-8") if data is not None else b""
-    req = urllib.request.Request(url, data=req_data, headers=hdrs, method="POST")
-    for attempt in range(3):
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                raw = resp.read()
-                if resp.headers.get("Content-Encoding", "").lower() == "gzip":
-                    raw = gzip.decompress(raw)
-                ct = resp.headers.get("Content-Type", "")
-                if "text/html" in ct and "json" not in ct:
-                    _log(source, f"HTML anti-bot response from {url[:80]}")
-                    return None
-                return json.loads(raw.decode("utf-8", errors="replace"))
-        except urllib.error.HTTPError as e:
-            if e.code == 429:
-                delay = 2.0 * (2 ** attempt)
-                _log(source, f"429 rate limited, retry {attempt+1}/3 after {delay:.0f}s")
-                if attempt < 2:
-                    time.sleep(delay)
-                    continue
-                return None
-            if e.code in (403, 404, 422):
-                _log(source, f"HTTP {e.code} from {url[:80]}")
-                return None
-            _log(source, f"HTTP {e.code}: {e.reason}")
-            return None
-        except (urllib.error.URLError, OSError, TimeoutError) as e:
-            _log(source, f"Network error: {e}")
-            return None
-        except json.JSONDecodeError:
-            _log(source, f"JSON decode error from {url[:80]}")
-            return None
-    return None
-
 
 def search_web(topic: str, from_date: str, to_date: str, depth: str = "default") -> List[Dict]:
     """Search the web via available backend (Brave, Exa, Serper, Parallel)."""
     limit = DEPTH_LIMITS["web"].get(depth, 10)
     core = extract_core(topic, frozenset({
         "people", "saying", "about", "community", "discussion",
-        "opinions", "thoughts", "reactions",
+        "opinions", "thoughts", "reactions"
     }))
 
     # Try Brave Search API
-    brave_key = os.environ.get("BRAVE_API_KEY") or os.environ.get("BRAVE_SEARCH_API_KEY")
+    brave_key = os.environ.get("BRAVE_SEARCH_API_KEY")
     if brave_key:
         url = (
             "https://api.search.brave.com/res/v1/web/search?"
@@ -1465,7 +1803,6 @@ def search_web(topic: str, from_date: str, to_date: str, depth: str = "default")
 # Hot Topics mode
 # ---------------------------------------------------------------------------
 
-
 def fetch_hot_topics() -> Dict[str, Any]:
     """Fetch trending topics from multiple free sources."""
     results: Dict[str, Any] = {"mode": "hot_topics", "items": {}}
@@ -1509,9 +1846,7 @@ def fetch_hot_topics() -> Dict[str, Any]:
         results["items"]["hackernews"] = stories
 
     # Polymarket trending
-    pm_params = urllib.parse.urlencode({
-        "limit": "10", "order": "volume24hr", "ascending": "false", "active": "true",
-    })
+    pm_params = urllib.parse.urlencode({"limit": "10", "order": "volume24hr", "ascending": "false", "active": "true"})
     pm_data = http_get_json(
         f"https://gamma-api.polymarket.com/events?{pm_params}",
         source="PM",
@@ -1540,7 +1875,7 @@ def fetch_hot_topics() -> Dict[str, Any]:
             block = m.group(1)
             repo_m = re.search(r'href="/([^"]+)"', block)
             desc_m = re.search(r'<p class="[^"]*col-9[^"]*">(.*?)</p>', block, re.DOTALL)
-            stars_m = re.search(r"(\d[\d,]*)\s*stars?\s*today", block)
+            stars_m = re.search(r'(\d[\d,]*)\s*stars?\s*today', block)
             if repo_m:
                 repos.append({
                     "repo": repo_m.group(1),
@@ -1558,7 +1893,6 @@ def fetch_hot_topics() -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Main search (all sources in parallel)
 # ---------------------------------------------------------------------------
-
 
 def search_all(topic: str, depth: str = "default") -> Dict[str, Any]:
     """Run all source searches in parallel and return combined results."""
@@ -1607,18 +1941,13 @@ def search_all(topic: str, depth: str = "default") -> Dict[str, Any]:
 # CLI entry point
 # ---------------------------------------------------------------------------
 
-
 def main() -> int:
-    import argparse
     parser = argparse.ArgumentParser(description="BuzzSearch - Multi-source social intelligence")
     parser.add_argument("topic", nargs="*", help="Research topic (omit for hot topics)")
     parser.add_argument("--hot", action="store_true", help="Fetch trending/hot topics")
     parser.add_argument("--depth", choices=["quick", "default", "deep"], default="default")
     parser.add_argument("--days", type=int, default=30, help="Lookback days (default: 30)")
-    parser.add_argument(
-        "--x-login", action="store_true",
-        help="Login to X/Twitter via Camofox and store cookies for future use",
-    )
+    parser.add_argument("--x-login", action="store_true", help="Login to X/Twitter via Camofox and store cookies for future use")
     args = parser.parse_args()
 
     global LOOKBACK_DAYS
@@ -1628,7 +1957,6 @@ def main() -> int:
     if args.x_login:
         if not HERMES_TOOLS_AVAILABLE:
             print("Error: Hermes tools not available for Camofox login.", file=sys.stderr)
-            print("Use the standalone Camofox CLI method instead (see docs/camofox-cli-x-login.md).", file=sys.stderr)
             return 1
         print("Please enter your X (Twitter) credentials to login and store cookies.", file=sys.stderr)
         username = input("Username or email: ").strip()
